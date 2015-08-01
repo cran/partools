@@ -26,12 +26,13 @@ related operations.
 
 \usage{
 filechunkname(basenm,ndigs,nodenum=NULL)
-filesort(cls,basenm,ndigs,colnum,outname,nsamp = 1000,header = FALSE,sep=" ",fread=FALSE)
+filesort(cls,basenm,ndigs,colnum,outname,nsamp = 1000,
+   header = FALSE,sep=" ",usefread=FALSE)
 filesplit(nch,basenm,header=FALSE,seqnums=FALSE)
 filecat(cls, basenm, header = FALSE)  
 readnscramble(cls,basenm,header=FALSE,sep= " ")
 filesave(cls,dname,newbasename,ndigs,sep)
-fileread(cls,fname,dname,ndigs,header=FALSE,sep=" ",fread=FALSE)
+fileread(cls,fname,dname,ndigs,header=FALSE,sep=" ",usefread=FALSE)
 filesplitrand(cls,fname,newbasename,ndigs,header=FALSE,sep)
 linecount(infile,header=FALSE,chunksize=100000)
 getnumdigs(nch)
@@ -52,8 +53,8 @@ dfilegetrows(cls,fnames,tmpdataexpr,header=FALSE,sep=" ")
   \item{colnum}{Column number on which the sort will be done.  It is
      assumed that this data column is free of NAs.}
   \item{outname}{Quoted name for the chunks of sorted output.}
-  \item{fread}{If true, use \code{fread} instead of \code{read.table};
-     generally much faster if \code{data.table} package is installed.}
+  \item{usefread}{If true, use \code{fread} instead of \code{read.table};
+     generally much faster; requires \code{data.table} package.}
   \item{nsamp}{Number of records to sample in each file chunk to
      determine bins for the bucket sort.}
   \item{header}{TRUE if the file chunks have headers.}
@@ -80,16 +81,6 @@ dfilegetrows(cls,fnames,tmpdataexpr,header=FALSE,sep=" ")
 
 \details{
 
-Use \code{filesort} to do a distributed file sort, placing the result as
-a distributed data frame/matrix in the memories of the cluster nodes.
-The first \code{nsamp} records are read from 
-each file chunk.  They are merged and quantiles formed, one quantile
-range for each cluster node.  Each node then reads all the file chunks, 
-retaining the records in its assigned range, and sorts them.  This 
-results in the input file being sorted, in memory, in a distributed 
-manner across nodes, under the name \code{basenm}.  At present, this
-utility is not very efficient.
-
 Use \code{filesplit} to convert a single file into distributed one, with
 \code{nch} chunks.  The file header, if present, will be retained in the
 chunks. If \code{seqnums} is TRUE, each line in a chunk will be preceded
@@ -112,6 +103,16 @@ user command \code{tmpdataexpr} to \code{tmpdata}, producing a subset of
 yielding the return value.  The paired function \code{dfilegetrows} is a
 distributed wrapper for \code{filegetrows}, just as \code{dfileagg} is
 for \code{fileagg}.
+
+Use \code{filesort} to do a distributed file sort, placing the result as
+a distributed data frame/matrix in the memories of the cluster nodes.
+The first \code{nsamp} records are read from 
+each file chunk.  They are merged and quantiles formed, one quantile
+range for each cluster node.  Each node then reads all the file chunks, 
+retaining the records in its assigned range, and sorts them.  This 
+results in the input file being sorted, in memory, in a distributed 
+manner across nodes, under the name \code{outname}.  At present, this
+utility is not very efficient.
 
 Operations such as \code{ca} need i.i.d. data. If the original file
 storage was ordered on some variable, one needs to randomize the data
@@ -171,12 +172,23 @@ filecat(cls,"m")
 # check that file m is back
 read.table("m",row.names=1)
 
+# example of filesave(), fileread()
+# make test distributed data frame
+clusterEvalQ(cls,x <- data.frame(u = runif(5),v = runif(5)))
+# apply filesave()
+filesave(cls,'x','xfile',1,' ')
+# check it
+fileread(cls,'xfile','xx',1,header=TRUE,sep=' ')
+clusterEvalQ(cls,xx)
+clusterEvalQ(cls,x)
+
+
 # example of filesort()
 # make test distributed input file
 m1 <- matrix(c(5,12,13,3,4,5,8,8,8,1,2,3,6,5,4),byrow=TRUE,ncol=3)
 m2 <- matrix(c(0,22,88,44,5,5,2,6,10,7,7,7),byrow=TRUE,ncol=3)
-write.table(m1,"m.1")
-write.table(m2,"m.2")
+write.table(m1,"m.1",row.names=FALSE)
+write.table(m2,"m.2",row.names=FALSE)
 # sort on column 2 and check result
 filesort(cls,"m",1,2,"msort",nsamp=3,header=TRUE)
 clusterEvalQ(cls,msort)  # data should be sorted on V2
@@ -217,6 +229,8 @@ cmd <- 'tmpdata[tmpdata$cyl == 4 & tmpdata$gear == 4,]'
 dfilegetrows(cls,c('ctm.1','ctm.2'),cmd,header=TRUE,sep=',') 
 # check
 mtc[mtc$cyl == 4 & mtc$gear == 4,]
+
+stopCluster(cls)
 
 
 }
