@@ -26,8 +26,8 @@ related operations.
 
 \usage{
 filechunkname(basenm,ndigs,nodenum=NULL)
-filesort(cls,basenm,ndigs,colnum,outname,nsamp = 1000,
-   header = FALSE,sep=" ",usefread=FALSE)
+filesort(cls,infilenm,colnum,outdfnm,infiledst=FALSE,
+   ndigs=0,nsamp=1000,header=FALSE,sep="",usefread=FALSE)
 filesplit(nch,basenm,header=FALSE,seqnums=FALSE)
 filecat(cls, basenm, header = FALSE)  
 readnscramble(cls,basenm,header=FALSE,sep= " ")
@@ -46,13 +46,16 @@ dfilegetrows(cls,fnames,tmpdataexpr,header=FALSE,sep=" ")
   \item{cls}{A cluster for the \pkg{parallel} package.}
   \item{nch}{Number of chunks for the file split.}
   \item{basenm}{A chunked file name, minus suffix.}
+  \item{infile}{Name of a nonchunked file.}
   \item{ndigs}{Number of digits in the chunked file name suffix.}
   \item{nodenum}{If non-NULL, get the name of the file chunk of cluster node
      \code{nodenum}; otherwise, get the name for the chunk associated
      with this node.}
+  \item{infilenm}{Name of input file (without suffix, if distributed).}
+  \item{outdfnm}{Name of output file (without suffix).}
+  \item{infiledst}{If TRUE, infilenm is distributed.}
   \item{colnum}{Column number on which the sort will be done.  It is
      assumed that this data column is free of NAs.}
-  \item{outname}{Quoted name for the chunks of sorted output.}
   \item{usefread}{If true, use \code{fread} instead of \code{read.table};
      generally much faster; requires \code{data.table} package.}
   \item{nsamp}{Number of records to sample in each file chunk to
@@ -60,7 +63,6 @@ dfilegetrows(cls,fnames,tmpdataexpr,header=FALSE,sep=" ")
   \item{header}{TRUE if the file chunks have headers.}
   \item{seqnums}{TRUE if the file chunks will have sequence numbers.}
   \item{sep}{Field delimiter used in \code{read.table}.}
-  \item{infile}{Quoted input file name.}
   \item{chunksize}{Number of lines to read at a time, for efficient I/O.}
   \item{dname}{Quoted name of a distributed data frame or matrix.  For
      \code{filesave}, the object must have column names.}
@@ -104,14 +106,14 @@ yielding the return value.  The paired function \code{dfilegetrows} is a
 distributed wrapper for \code{filegetrows}, just as \code{dfileagg} is
 for \code{fileagg}.
 
-Use \code{filesort} to do a distributed file sort, placing the result as
-a distributed data frame/matrix in the memories of the cluster nodes.
-The first \code{nsamp} records are read from 
-each file chunk.  They are merged and quantiles formed, one quantile
-range for each cluster node.  Each node then reads all the file chunks, 
-retaining the records in its assigned range, and sorts them.  This 
-results in the input file being sorted, in memory, in a distributed 
-manner across nodes, under the name \code{outname}.  At present, this
+Use \code{filesort} to do a file sort, with the input file being either
+distributed or ordinary, placing the result as a distributed data
+frame/matrix in the memories of the cluster nodes.  The first
+\code{nsamp} records are read from the file, and are used to form one
+quantile range for each cluster node.  Each node then reads the input
+file, retaining the records in its assigned range, and sorts them.  This
+results in the input file being sorted, in memory, in a distributed
+manner across nodes, under the specifid name.  At present, this
 utility is not very efficient.
 
 Operations such as \code{ca} need i.i.d. data. If the original file
@@ -190,11 +192,16 @@ m2 <- matrix(c(0,22,88,44,5,5,2,6,10,7,7,7),byrow=TRUE,ncol=3)
 write.table(m1,"m.1",row.names=FALSE)
 write.table(m2,"m.2",row.names=FALSE)
 # sort on column 2 and check result
-filesort(cls,"m",1,2,"msort",nsamp=3,header=TRUE)
+filesort(cls,"m",2,"msort",ndigs=1,nsamp=3,header=TRUE)
 clusterEvalQ(cls,msort)  # data should be sorted on V2
 # check by comparing to input
 m1
 m2
+m <- rbind(m1,m2)
+write.table(m,"m",row.names=FALSE)
+clusterEvalQ(cls,rm(msort))
+filesort(cls,"m",2,"msort",infiledst=FALSE,nsamp=3,header=TRUE)
+clusterEvalQ(cls,msort)  # data should be sorted on V2
 
 # example of readnscramble()
 co2 <- head(CO2,25) 

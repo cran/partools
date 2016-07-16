@@ -1,4 +1,5 @@
 
+
 # general "Snow" (the part of 'parallel' adapted from the old Snow)
 # utilities, some used in Snowdoop but generally applicable
 
@@ -9,7 +10,7 @@
 # arguments:
 #
 # cls: a 'parallel' cluster
-# m: a matrix or data frame
+# m: a matrix, data frame or data.table
 # mchunkname: name to be given to the chunks of m at the cluster nodes
 # scramble: if TRUE, randomly assign rows of the data frame to the chunks; 
 #           otherwsie, the first rows go to the first chunk, the next set
@@ -24,7 +25,7 @@ formrowchunks <- function(cls,m,mchunkname,scramble=FALSE) {
 #    getrowchunk <- function(rc) 
 #       assign(mchunkname,m[rc,],envir=.GlobalEnv)
 #    invisible(clusterApply(cls,rcs,getrowchunk))
-   invisible(clusterApply(cls,rowchunks,
+   invisible(clusterApply(cls,rowchunks,  # write to global at worker node
       function(chunk) 
          assign(mchunkname,chunk,envir=.GlobalEnv)))
 }
@@ -88,8 +89,25 @@ exportlibpaths <- function(cls) {
 # full object
 distribsplit <- function(cls,dfname,scramble=FALSE) {
    dfr <- get(dfname,envir=sys.parent())
-   dfr <- as.data.frame(dfr)
+   if(!is.data.table(dfr)) dfr <- as.data.frame(dfr)
    formrowchunks(cls,dfr,dfname,scramble)
+   for (j in 1:ncol(dfr)) {
+      mdj <- mode(dfr[,j])
+      if (mdj == 'character') 
+         warning('character column converted to factor') else
+      if (mdj == 'factor') {
+         usubj <- dfname
+         ipstrcat(usubj,'[,')
+         ipstrcat(usubj,as.character(j))
+         ipstrcat(usubj,']')
+         remotecmd <- usubj
+         ipstrcat(remotecmd,' <- ')
+         ipstrcat(remotecmd,'as.factor(')
+         ipstrcat(remotecmd,usubj)
+         ipstrcat(remotecmd,')')
+         clusterEvalQ(cls,docmd(remotecmd))
+      }
+   }
 }
 
 # collects a distributed matrix/data frame specified by dfname at
@@ -98,7 +116,7 @@ distribsplit <- function(cls,dfname,scramble=FALSE) {
 distribcat <- function(cls,dfname) {
    toexec <- paste("clusterEvalQ(cls,",dfname,")")
    tmp <- eval(parse(text=toexec))
-   assign(dfname,Reduce(rbind,tmp),pos=.GlobalEnv)
+   Reduce(rbind,tmp)
 }
 
 # distributed version of aggregate()
@@ -108,9 +126,12 @@ distribcat <- function(cls,dfname) {
 #    cls: cluster
 #    ynames: names of variables on which FUN is to be applied
 #    xnames: names of variables that define the grouping
-#    dataname: quoted name of the data frame
-#    FUN: quoted name of aggregation function to be used in aggregation
-#         within cluster nodes
+#    dataname: quoted name of the data frame or data.table
+#    FUN: quoted name(s) of aggregation function to be used in 
+#         aggregation within cluster nodes; for a data frame,
+#         this function has a single argument; in the case of 
+#         a data.table, this will be a vector of length the 
+#         same as the length of ynames (or recycling will be used)
 #    FUN1: quoted name of the aggregation function to be used in 
 #          aggregation between cluster nodes
 
@@ -125,16 +146,45 @@ distribcat <- function(cls,dfname) {
 # return value: aggregate()-style data frame, with column of cell counts
 # appended at the end
 
-#    distribagg(cls,"x=d, by=list(d$x,d$y)","max",2)
+# currently cannot have FUNdim > 1 for data.tables;  duplicate ynames;
+#
+# distribagg(cls,c('mpg','mpg','disp','disp','hp','hp'),
+#             c('cyl','gear'),'mtc1',
+#             FUN=c('sum','length'))
+# doesn't matter here 
 
-distribagg <- function(cls,ynames,xnames,dataname,FUN,FUN1=FUN) {
-   nby <- length(xnames) # number in the "by" arg to aggregate()
-   # set up aggregate() command to be run on the cluster nodes
-   ypart <- paste("cbind(",paste(ynames,collapse=","),")",sep="")
-   xpart <- paste(xnames,collapse="+")
-   forla <- paste(ypart,"~",paste(xnames,collapse="+"))
-   remotecmd <-
-      paste("aggregate(",forla,",data=",dataname,",",FUN,")",sep="")
+distribagg <- function(cls,ynames,xnames,dataname,FUN,FUNdim=1,FUN1=FUN) {
+   ncellvars <- length(xnames) # number of cell-specification variables
+   nagg <- length(ynames) # number of variables to tabulate
+   isdt <- distribisdt(cls,dataname)
+   if (isdt) {
+      if (length(FUN) != length(ynames))
+         stop('lengths of FUN and ynames must be the same for data.tables')
+      if (FUNdim > 1) stop('FUNdim must be 1 for data.tables')
+      # if (length(FUN) < nagg) FUN <- rep_len(FUN,nagg*length(FUN))
+      remotecmd <- paste(dataname,'[,.(',sep='')
+      for (i in 1:nagg) {
+         ipstrcat(remotecmd,FUN[i],'(',ynames[i],')')
+         if (i == nagg) ipstrcat(remotecmd,')')
+         ipstrcat(remotecmd,',') 
+      }
+      xns <- xnames
+      quotemark <- '"'
+      for (i in 1:length(xns)) {
+         xns[i] <- paste(quotemark,xns[i],quotemark,sep='')
+      }
+      ipstrcat(remotecmd,'by=c(',xns,')]',innersep=',')
+   } else {
+        if (length(FUN) > 1) 
+           stop('for data.frames,FUN must be a single string')
+        # set up aggregate() command to be run on the cluster nodes
+        ypart <- paste("cbind(",paste(ynames,collapse=","),")",sep="")
+        xpart <- paste(xnames,collapse="+")
+        # the formula
+        frmla <- paste(ypart,"~",paste(xnames,collapse="+"))
+        remotecmd <-
+           paste("aggregate(",frmla,",data=",dataname,",",FUN,")",sep="")
+   }
    clusterExport(cls,"remotecmd",envir=environment())
    # run the command, and combine the returned data frames into one big
    # data frame
@@ -143,14 +193,74 @@ distribagg <- function(cls,ynames,xnames,dataname,FUN,FUN1=FUN) {
    # typically a given cell will found at more than one cluster node;
    # they must be combined, using FUN1
    FUN1 <- get(FUN1)
-   aggregate(x=agg[,-(1:nby)],by=agg[,1:nby,drop=FALSE],FUN1)
+   # if FUN returns a vector rather than a scalar, the "columns" of agg
+   # associated with ynames will be matrices; need to expand so that
+   # have real columns
+   if (FUNdim > 1) {
+      # note: names will be destroyed
+      tmp  <- agg[,1:ncellvars,drop=FALSE]
+      for (i in 1:(ncol(agg)-ncellvars))
+         tmp <- cbind(tmp,agg[,ncellvars+i])
+      agg <- tmp
+      names(agg)[-(1:ncellvars)] <- rep(ynames,each=FUNdim)
+   }
+   if (isdt) {
+      agg <- as.data.frame(agg)
+      names(agg)[-(1:ncellvars)] <- ynames
+   }
+   aggregate(x=agg[,-(1:ncellvars)],by=agg[,1:ncellvars,drop=FALSE],FUN1)
 }
 
 # get the indicated cell counts, cells defined according to the
 # variables in xnames 
 distribcounts <- function(cls,xnames,dataname) {
-   distribagg(cls,xnames[1],xnames,dataname,"length","sum")
+   isdt <- distribisdt(cls,dataname)
+   res <- 
+      if (isdt) distribagg(cls,'.N',xnames,dataname,"sum",FUN1="sum") else
+      distribagg(cls,xnames[1],xnames,dataname,"length",FUN1="sum")
+   names(res)[length(xnames)+1] <- 'count'
+   res
 }
+
+# determine whether the distributed object dataname is a data.table
+distribisdt <- function(cls,dataname) {
+   rcmd <- paste('is.data.table(',dataname,')',sep='')
+   clusterExport(cls,"rcmd",envir=environment())
+   clusterEvalQ(cls,docmd(rcmd))[[1]]
+}
+
+sumlength <- function(a) c(sum(a),length(a))
+
+# get the indicated cell means of the variables in ynames,
+# cells defined according to the variables in xnames; if saveni is TRUE,
+# then add one column 'yni', giving the number of Y values in this cell
+distribmeans <- function(cls,ynames,xnames,dataname,saveni=FALSE) {
+   clusterExport(cls,'sumlength',envir=environment())
+   isdt <- distribisdt(cls,dataname)
+   if (!isdt) {
+      da <- distribagg(cls,ynames,xnames,dataname,
+         FUN='sumlength',FUNdim=2,FUN1='sum')
+   } else {
+      da <- distribagg(cls,rep(ynames,each=2),
+         xnames,dataname,
+         FUN=rep(c('sum','length'),length((ynames))),FUN1='sum')
+   }
+   nx <- length(xnames)
+   tmp <- da[,1:nx]
+   day <- da[,-(1:nx)]  # Y values in da
+   ny <- length(ynames)
+   for (i in 1:ny) {
+      tmp <- cbind(tmp,day[,2*i-1] / day[,2*i])
+   }
+   tmp <- as.data.frame(tmp)
+   if (saveni) {
+      tmp$yni <- day[,2]
+      names(tmp) <- c(xnames,ynames,'yni')
+   }
+   names(tmp)[-(1:nx)] <- ynames
+   tmp
+}
+
 
 # currently not in service; xtabs() call VERY slow
 # distribtable <- function(cls,xnames,dataname) {
@@ -191,3 +301,37 @@ geteltis <- function(lst,i) {
    get1elti <- function(lstmember) lstmember[i]
    sapply(lst,get1elti)
 }
+
+# in-place string concatenation; appends the strings in ... to str1,
+# assigning back to str1 (at least in name, if not memory location), in
+# the spirit of string.append() in Python; here DOTS is one of more
+# expressions separated by commas, with each expression being either a
+# string or a vector of strings; within a vector, innersep is used as a
+# separator, while between vectors it is outersep
+
+# generaed from gtools code:
+# ipstrcat <- defmacro(str1,DOTS,outersep='',innersep='',expr = (
+#       for (str in list(...)) {
+#          lstr <- length(str)
+#          tmp <- str[1]
+#          if (lstr > 1) 
+#             for (i in 2:lstr) 
+#                tmp <- paste(tmp,str[i],sep=innersep)
+#          str1 <- paste(str1,tmp,sep=outersep)
+#       }
+#    )
+# )
+
+ipstrcat <- function (str1 = stop("str1 not supplied"), ..., outersep = "", 
+    innersep = "") 
+{
+    tmp <- substitute((for (str in list(...)) {
+        lstr <- length(str)
+        tmp <- str[1]
+        if (lstr > 1) for (i in 2:lstr) tmp <- paste(tmp, str[i], 
+            sep = innersep)
+        str1 <- paste(str1, tmp, sep = outersep)
+    }))
+    eval(tmp, parent.frame())
+}
+

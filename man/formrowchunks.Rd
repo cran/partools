@@ -1,4 +1,4 @@
-\name{formrowchunks,addlists,matrixtolist,setclsinfo,getpte,distribsplit,distribcat,distribagg,distribrange,distribcounts,distribgetrows,docmd,geteltis}
+\name{formrowchunks,addlists,matrixtolist,setclsinfo,getpte,distribsplit,distribcat,distribagg,distribrange,distribcounts,distribgetrows,docmd,geteltis,distribmeans,distribisdt,ipstrcat}
 \alias{formrowchunks}
 \alias{matrixtolist} 
 \alias{addlists}
@@ -11,8 +11,11 @@
 \alias{distribrange}
 \alias{distribcounts}
 \alias{distribgetrows}
+\alias{distribmeans}
 \alias{docmd}
+\alias{distribisdt}
 \alias{geteltis}
+\alias{ipstrcat}
 
 \title{
 Utilities for \pkg{parallel} cluster code.
@@ -31,18 +34,21 @@ getpte()
 exportlibpaths(cls)
 distribsplit(cls,dfname,scramble=FALSE)
 distribcat(cls,dfname) 
-distribagg(cls,ynames,xnames,dataname,FUN,FUN1) 
+distribagg(cls,ynames,xnames,dataname,FUN,FUNdim=1,FUN1=FUN) 
 distribrange(cls,vec,na.rm=FALSE) 
 distribcounts(cls,xnames,dataname)
+distribmeans(cls,ynames,xnames,dataname,saveni=FALSE)
 distribgetrows(cls,cmd)
+distribisdt(cls,dataname) 
 docmd(toexec) 
 geteltis(lst,i)
+ipstrcat(str1 = stop("str1 not supplied"), ..., outersep = "", innersep = "")
 }
 
 \arguments{
   \item{cls}{A cluster for the \pkg{parallel} package.}
   \item{scramble}{If TRUE, randomize the row order in the resulting data
-  frame.}
+     frame.}
   \item{rc}{Set to 1 for rows, other for columns.}
   \item{m}{A matrix or data frame.}
   \item{mchunkname}{Quoted name to be given to the created chunks.}
@@ -51,14 +57,22 @@ geteltis(lst,i)
   \item{add}{``Addition'' function, which could be summation,
      concatenation and so on.}
   \item{dfname}{Quoted name of a data frame, either centralized or
-  distributed.} 
+     distributed.} 
   \item{ynames}{Vector of quoted names of variables on which \code{FUN} 
      is to be applied.}
+
+  \item{...}{One of more vectors of character strings, where the vectors
+     are typically of length 1.}
   \item{xnames}{Vector of quoted names of variables that define the
      grouping.}
-  \item{dataname}{Quoted name of a distributed data frame.}
-  \item{FUN}{Quoted name of function to be used in
-     aggregating within cluster nodes.}
+  \item{dataname}{Quoted name of a distributed data frame or data.table.}
+  \item{saveni}{If TRUE, save the chunk sizes.}
+  \item{FUN}{Quoted name of a single-argument function to be used in
+     aggregating within cluster nodes.  If \code{dataname} is the name
+     of a data.table, \code{FUN} must be a vector of function names, of
+     length equal to that of \code{ynames}.}
+  \item{FUNdim}{Number of elements in the return value of \code{FUN}.
+     Must be 1 for data.tables.}
   \item{FUN1}{Quoted name of function to be used in
      aggregation between cluster nodes.}
   \item{vec}{Quoted expression that evaluates to a vector.}
@@ -67,6 +81,11 @@ geteltis(lst,i)
   \item{toexec}{Quoted string containing command to be executed.}
   \item{lst}{An R list of vectors.}
   \item{i}{A column index}
+  \item{str1}{A character string.}
+  \item{outersep}{Separator, e.g. a comma, between strings specified in
+  ...}
+  \item{innersep}{Separator, e.g. a comma, within string vectors specified in
+  ...}
 }
 
 \details{The \code{setclsinfo} function does initialization needed for
@@ -92,7 +111,7 @@ list.
 The function \code{exportlibpaths}, invoked from the manager, exports
 the manager's R search path to the workers.
 
-The function \code{distribcat} splits a data frame \code{dfname} into
+The function \code{distribsplit} splits a data frame \code{dfname} into
 approximately  equal-sized chunks of rows, placing the chunks on the
 cluster nodes, as global variables of the same name. The opposite action
 is taken by \code{distribcat}, coalsecing variables of the given name in
@@ -100,8 +119,14 @@ the cluster nodes into one grand data frame as the calling (i.e.
 manager) node.
 
 The package's \code{distribagg} function is a distributed (and somewhat
-restricted) form of \code{aggregate}.  The special case of aggregating
-counts is handled by the wrapper \code{distribcounts}.
+restricted) form of \code{aggregate}.  The latter is called to each
+distributed chunk with the function \code{FUN}.  The manager collects
+the results and calls \code{FUN1}.
+
+The special cases of aggregating counts and means is handled by the
+wrappers \code{distribcounts} and \code{distribmeans}.  In each case,
+cells are defined by \code{xnames}, and aggregation done first within
+workers and then across workers. 
 
 The \code{distribrange} function is a distributed form of \code{range}.
 
@@ -189,10 +214,20 @@ distribcounts(cls,c("cyl","gear"),"mtc")
 # check
 table(mtc$cyl,mtc$gear)
 
+# find mean mpg, hp for each cyl/gear combination
+distribmeans(cls,c('mpg','hp'),c('cyl','gear'),'mtc')
+
 # extract and collect all the mtc rows in which the number of cylinders is 8
 distribgetrows(cls,'mtc[mtc$cyl == 8,]')
 # check
 mtc[mtc$cyl == 8,]
+
+# same for data.tables
+mtc <- as.data.table(mtc)
+setkey(mtc,cyl)
+distribsplit(cls,'mtc')
+distribcounts(cls,c("cyl","gear"),"mtc")
+distribmeans(cls,c('mpg','hp'),c('cyl','gear'),'mtc')
 
 stopCluster(cls)
 
