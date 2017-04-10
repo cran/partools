@@ -29,12 +29,12 @@ filechunkname <- function (basenm, ndigs,nodenum=NULL)
 #    cls: a 'parallel' cluster
 #    infilenm: name of input file (without suffix, if distributed)
 #    colnum: index of the column to be sorted
-#    outdfnm: name of output file (without suffix)
+#    outdfnm: name of output distributed data frame 
 #    infiledst: if TRUE, infilenm is distributed
 #    ndigs: number of digits in suffix of distributed files
 #    nsamp: bins formed by sampling the first nsamp records of infilenm
 #    header: infilenm has a header
-#    sep: sep value for infilenm
+#    sep: sep character between fields in infilenm
 #    usefread: use fread()
 
 filesort <- function(cls,infilenm,colnum,outdfnm,
@@ -46,8 +46,42 @@ filesort <- function(cls,infilenm,colnum,outdfnm,
    bds <- getbounds(cls,infilenm,infiledst,colnum,ndigs,header,sep,nsamp) 
    # at each node, cull out the records in infilenm for that node's bin,
    # and sort them at the node
-   invisible(clusterApply(cls,bds,makemysortedchunk,
-      infilenm,ndigs,colnum,outdfnm,infiledst,header,sep,usefread))
+   invisible(
+   clusterApply(cls,bds,makemysortedchunk,
+      infilenm,ndigs,colnum,outdfnm,infiledst,header,sep,usefread)
+   )
+}
+
+# does most of the work for filesort(), for the given node; reads in
+# data from disk, flagging records for this node's bin; finally writes
+# the assembled data frame to global space of this node
+makemysortedchunk <- function(mybds,infilenm,ndigs,colnum,outdfnm,
+                    infiledst,header,sep,usefread) {
+   pte <- getpte()
+   me <- pte$myid
+   ncls <- pte$ncls
+   mylo <- mybds[1]
+   myhi <- mybds[2]
+   if (usefread) {
+      requireNamespace('data.table')
+      myfread <- data.table::fread
+   } else myfread <- read.table
+   if (!infiledst) {
+      # this node reads the ordinary file, and grabs the records 
+      # belonging to its bin
+      tmp <- myfread(infilenm,header=header,sep=sep) 
+      mychunk <- getmypart(tmp,colnum,myhi,mylo)
+   } else {
+      # this node reads all chunks of`the distributed file, 
+      # and grabs the records belonging to its bin
+      for (i in 1:ncls) {
+         tmp <- myfread(filechunkname(infilenm,ndigs,i),header=header,sep=sep) 
+         tmp <- getmypart(tmp,colnum,myhi,mylo)
+         mychunk <- if (i == 1) tmp else rbind(mychunk,tmp)
+      }
+   }
+   sortedmchunk <- mychunk[order(mychunk[,colnum]),]
+   eval(parse(text = paste(outdfnm,' <<- sortedmchunk')))
 }
 
 # find the bins
@@ -79,35 +113,6 @@ getsample <- function(basenm,ndigs,colnum,nsamp,
 {
    fname <- filechunkname(basenm,ndigs)
    read.table(fname,nrows=nsamp,header=header,sep=sep)[,colnum]
-}
-
-makemysortedchunk <- function(mybds,infilenm,ndigs,colnum,outdfnm,
-                    infiledst,header,sep,usefread) {
-   pte <- getpte()
-   me <- pte$myid
-   ncls <- pte$ncls
-   mylo <- mybds[1]
-   myhi <- mybds[2]
-   if (usefread) {
-      requireNamespace('data.table')
-      myfread <- data.table::fread
-   } else myfread <- read.table
-   if (!infiledst) {
-      # this node reads the ordinary file, and grabs the records 
-      # belonging to its bin
-      tmp <- myfread(infilenm,header=header,sep=sep) 
-      mychunk <- getmypart(tmp,colnum,myhi,mylo)
-   } else {
-      # this node reads all chunks of`the distributed file, 
-      # and grabs the records belonging to its bin
-      for (i in 1:ncls) {
-         tmp <- myfread(filechunkname(infilenm,ndigs,i),header=header,sep=sep) 
-         tmp <- getmypart(tmp,colnum,myhi,mylo)
-         mychunk <- if (i == 1) tmp else rbind(mychunk,tmp)
-      }
-   }
-   sortedmchunk <- mychunk[order(mychunk[,colnum]),]
-   assign(outdfnm,sortedmchunk,envir=.GlobalEnv)  # write to global at worker
 }
 
 # grab for this node's bin from this chunk of the file (the whole file,
@@ -172,7 +177,9 @@ readmypart <- function(myidxs,
       tmp <- tmp[tmp <= linecounts[i]]
       mydf <- rbind(mydf,filechunk[tmp,])
    }
-   assign(basenm,mydf,envir=.GlobalEnv)  # write to global at worker
+   ### assign(basenm,mydf,envir=.GlobalEnv)  # write to global at worker
+   eval(parse(text = 
+      paste('assign("',basenm,'",mydf,envir=.GlobalEnv)',sep='')))
 }
 
 # split a file basenm into nch approximately equal-sized chunks, with
@@ -207,14 +214,86 @@ filesplit <- function(nch,basenm,header=FALSE,seqnums=FALSE) {
 }
 
 # like filesplit(), but randomizing the records
-#
-# more efficient versions could be written that do not go through
-# in-memory intermediary
 filesplitrand <- function(cls,fname,newbasename,ndigs,header=FALSE,sep) {
    tmpdf <- read.table(fname,header=header,sep=sep)
    # tmpdf <- freadfname,header=header,sep=sep)
    distribsplit(cls,'tmpdf',scramble=TRUE)
    filesave(cls,'tmpdf',newbasename,ndigs,sep=sep)
+}
+
+# same aim as filesplitrand(), but without ever reading more than one
+# record at a time into memory 
+#
+# assumes that filesplit() has been run first
+#
+# if one has a file f and wishes to divide it into chunks with random
+# order of records, one might call filesplit() first, then fileshuffle()
+# several times in succession
+#
+# the number of output files need not be the same as the number inputs
+# thus enabling adaptation to expansion or contraction of the
+# computation cluster
+
+# arguments:
+
+#    inbasename: basename of the input files, e.g. x for x.1, x.2, ...
+#    nout: number of output files
+#    outbasename: basename of the output files
+#    header: if TRUE, it is assumed (but not checked) that 
+#            all input files have the same header
+
+fileshuffle <- function(inbasename,nout,outbasename,header=FALSE) {
+   infiles <- getinfiles(inbasename)
+   nin <- length(infiles)
+   incons <- list(length=nin)
+   # set up connections for the input files
+   for (i in 1:nin) {
+      con <- file(infiles[i],open='r')
+      incons[[i]] <- con
+   } 
+   # get header, if any
+   if (header) for (i in 1:nin) hdr <- readLines(incons[[i]],1)
+   # set up connections for the output files
+   ndigs <- getnumdigs(nout)
+   outcons <- list(length=nout)
+   for (j in 1:nout) {
+      fn <- filechunkname(outbasename,ndigs,j)
+      conout <- file(fn,open='w')
+      if (header) writeLines(hdr,conout)
+      outcons[[j]] <- conout
+   }
+   nrecs <- rep(0,nout)  # number of records in each file
+   # start shuffle
+   repeat {
+      # read a record from a random input file
+      if (length(incons) > 0) {
+         i <- sample(1:length(incons),1)
+         rec <- readLines(incons[[i]],1)
+         if (length(rec) == 0)  {  # end of file
+            close(incons[[i]])
+            incons[[i]] <- NULL
+         } else {
+            # write to a random output file
+            j <- sample(1:nout,1)
+            writeLines(rec,outcons[[j]])
+            nrecs[j] <- nrecs[j] + 1
+         }
+      } else {
+         for (j in 1:nout) close(outcons[[j]])
+         return()
+      }
+   }
+}
+
+# gather the names of all the files with names starting with bn + '.'
+getinfiles <- function(bn) {
+   d <- dir()
+   bnpoint <- paste(bn,'.',sep='')
+   lbn1 <- nchar(bnpoint)
+   startswith <- function(di) 
+      substr(di,1,lbn1) == bnpoint
+   tmp <- startswith(d)
+   d[tmp]
 }
 
 # get the number of lines in the file 

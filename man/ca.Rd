@@ -1,4 +1,4 @@
-\name{ca,cabase,calm,caglm,caprcomp,cakm,cameans,caquantile,caagg}
+\name{ca,cabase,calm,caglm,caprcomp,cakm,cameans,caquantile,caagg,caknn}
 \alias{ca}
 \alias{cabase}
 \alias{calm}
@@ -8,6 +8,7 @@
 \alias{cameans}
 \alias{caquantile}
 \alias{caagg}
+\alias{caknn}
 
 \title{Software Alchemy: Turning Complex Statistical Computations into
 Embarrassingly-Parallel Ones}
@@ -26,6 +27,7 @@ cakm(cls,mtdf,ncenters,p)
 cameans(cls,cols,na.rm=FALSE) 
 caquantile(cls,vec, probs = c(0.25, 0.5, 0.75),na.rm=FALSE) 
 caagg(cls,ynames,xnames,dataname,FUN)
+caknn(cls, yname, k, xname='')
 }
 
 \arguments{
@@ -55,6 +57,11 @@ caagg(cls,ynames,xnames,dataname,FUN)
      before distributing.}
   \item{cols}{A quoted string that evaluates to a data frame or matrix.}
   \item{vec}{A quoted string that evaluates to a vector.}
+  \item{yname}{A quoted variable name, for the Y vector.}
+  \item{k}{Number of nearest neighbors.}
+  \item{xname}{A quoted variable name, for the X matrix/data frame.  If
+     empty, it is assumed that \code{preprocessx} has already been run on
+     the nodes; if nonempty, that function is run on this X data.}
   \item{ynames}{A vector of quoted variable names.}
   \item{xnames}{A vector of quoted variable names.}
   \item{dataname}{Quoted name of a data frame or matrix.}
@@ -62,14 +69,16 @@ caagg(cls,ynames,xnames,dataname,FUN)
      \code{quantile}. Should not be 0.00 or 1.00, as asymptotic
      normality doesn't hold.}
   \item{FUN}{Quoted name of a function.}
+
 }
 
 \details{Implements the ``Software Alchemy'' (SA) method for
 parallelizing statistical computations (N. Matloff, \emph{Parallel
-Computation for Data Science}, Chapman and Hall, 2015, research article
-to appear in the \emph{Journal of Statistical Software}.)  This can
-result in substantial speedups in computation, as well as address limits
-on physical memory.
+Computation for Data Science}, Chapman and Hall, 2015, with further
+details in N. Matloff, Software Alchemy: Turning Complex Statistical
+Computations into Embarrassingly-Parallel Ones, \emph{Journal of
+Statistical Software}, 2016.)  This can result in substantial speedups
+in computation, as well as address limits on physical memory.
 
 The method involves breaking the data into chunks, and then applying the
 given estimator to each one.  The results are averaged, and an estimated
@@ -81,15 +90,20 @@ done, say via \code{distribsplit} or \code{readnscramble}.
 Note that in \code{cabase}, the data object is not specified explicitly
 in the argument list.  This is done through the function \code{ovf}.
 
-Key point:  The SA estimator is statistically equivalent to the
+Key point:  \emph{The SA estimator is statistically equivalent to the
 original, nonparallel one, in the sense that they have the SAME
 asymptotic statistical accuracy.  Neither the non-SA nor the SA
-estimator is "better" than the other, and usually they will be quite
+estimator is "better" than the other}, and usually they will be quite
 close to each other anyway.  Since we would use SA only with large data
 sets anyway (otherwise, parallel computation would not be needed for
 speed), the asymptotic aspect should not be an issue.  In other words,
 with SA we achieve the same statistical accuracy while possibly
 attaining much faster computation.
+
+It is vital to keep in mind that \emph{The memory space issue can be
+just as important as run time}.  Even if the problem is run on many
+cores, if the total memory space needed exceeds that of the machine,
+the run may fail.
 
 Wrapper functions, applying SA to the corresponding R
 function (or function elsewere in this package):
@@ -198,6 +212,7 @@ lm(u[,3] ~ u[,1]+u[,2])
 ovf <- function(dummy=NULL) lm(V3 ~ .,data=z168)
 ca(cls,u,ovf,estf=coef,estcovf=vcov)$tht
 
+\dontrun{
 # Census data on programmers and engineers; include a quadratic term for
 # age, due to nonmonotone relation to income
 data(prgeng) 
@@ -230,6 +245,14 @@ distribsplit(cls,"pe")
 z1 <- cakm(cls,'pe',3,3); z1$size; z1$centers 
 # check algorithm unstable
 z1$thts  # looks unstable
+
+pe <- prgeng 
+pe$ms <- as.integer(pe$educ == 14) 
+pe$phd <- as.integer(pe$educ == 16) 
+pe <- pe[,c(1,7,8,9,12,13)] 
+distribsplit(cls,'pe',scramble=TRUE)
+kout <- caknn(cls,'pe[,3]',50,'pe[,-3]') 
+}
 
 stopCluster(cls)
 
